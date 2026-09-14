@@ -1,0 +1,157 @@
+name: Build Baritone Plus
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-baritone-plus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: Clone 26.1 Baritone port
+        run: |
+          git clone --depth 1 https://github.com/XMRhapsody0807/NewBaritone.git baritone-plus
+
+      - name: Apply Baritone+ patches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('baritone-plus')
+
+          def replace(path, old, new, count=-1):
+              p = root / path
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'Missing expected text in {path}: {old[:100]!r}')
+              s = s.replace(old, new, count)
+              p.write_text(s)
+
+          # Target MC 26.1.2 + brand artifact.
+          replace('gradle.properties', 'mod_version=1.17.0', 'mod_version=1.17.0-plus.1')
+          replace('gradle.properties', 'archives_base_name=baritone', 'archives_base_name=baritoneplus')
+          replace('gradle.properties', 'minecraft_version=26.1', 'minecraft_version=26.1.2')
+
+          replace('fabric/src/main/resources/fabric.mod.json', '"name": "Baritone"', '"name": "Baritone+"')
+          replace('fabric/src/main/resources/fabric.mod.json', '"description": "Google Maps for Blockgame"', '"description": "Baritone+, smoother movement and modern path visuals"')
+          replace('fabric/src/main/resources/fabric.mod.json', '"minecraft": ["26.1"]', '"minecraft": ">=26.1 <26.2"')
+
+          settings = root / 'src/api/java/baritone/api/Settings.java'
+          s = settings.read_text()
+          reps = {
+              'public final Setting<Double> randomLooking113 = new Setting<>(2d);': 'public final Setting<Double> randomLooking113 = new Setting<>(0d);',
+              'public final Setting<Boolean> renderPathAsLine = new Setting<>(false);': 'public final Setting<Boolean> renderPathAsLine = new Setting<>(true);',
+              'public final Setting<Boolean> renderGoalAnimated = new Setting<>(true);': 'public final Setting<Boolean> renderGoalAnimated = new Setting<>(false);',
+              'public final Setting<Boolean> renderSelectionBoxes = new Setting<>(true);': 'public final Setting<Boolean> renderSelectionBoxes = new Setting<>(false);',
+              'public final Setting<Boolean> renderGoalIgnoreDepth = new Setting<>(true);': 'public final Setting<Boolean> renderGoalIgnoreDepth = new Setting<>(false);',
+              'public final Setting<Boolean> renderSelectionBoxesIgnoreDepth = new Setting<>(true);': 'public final Setting<Boolean> renderSelectionBoxesIgnoreDepth = new Setting<>(false);',
+              'public final Setting<Boolean> renderPathIgnoreDepth = new Setting<>(true);': 'public final Setting<Boolean> renderPathIgnoreDepth = new Setting<>(false);',
+              'public final Setting<Float> pathRenderLineWidthPixels = new Setting<>(5F);': 'public final Setting<Float> pathRenderLineWidthPixels = new Setting<>(1.8F);',
+              'public final Setting<Float> goalRenderLineWidthPixels = new Setting<>(3F);': 'public final Setting<Float> goalRenderLineWidthPixels = new Setting<>(1.8F);',
+              'public final Setting<Boolean> fadePath = new Setting<>(false);': 'public final Setting<Boolean> fadePath = new Setting<>(true);',
+              'public final Setting<Boolean> smoothLook = new Setting<>(false);': 'public final Setting<Boolean> smoothLook = new Setting<>(true);',
+              'public final Setting<Color> colorCurrentPath = new Setting<>(Color.RED);': 'public final Setting<Color> colorCurrentPath = new Setting<>(new Color(139, 111, 232));',
+              'public final Setting<Color> colorNextPath = new Setting<>(Color.MAGENTA);': 'public final Setting<Color> colorNextPath = new Setting<>(new Color(190, 168, 255));',
+          }
+          for a,b in reps.items():
+              if a not in s:
+                  raise SystemExit(f'Missing Settings replacement: {a}')
+              s = s.replace(a,b)
+
+          anchor = '    public final Setting<Integer> smoothLookTicks = new Setting<>(5);\n'
+          plus_settings = '''    public final Setting<Integer> smoothLookTicks = new Setting<>(5);\n\n    /** Baritone+: show smooth client-side rotations even when freeLook was previously enabled. */\n    public final Setting<Boolean> baritonePlusVisualRotations = new Setting<>(true);\n\n    /** Baritone+: maximum visible yaw movement per tick, in degrees. */\n    public final Setting<Float> baritonePlusMaxYawStep = new Setting<>(14.0F);\n\n    /** Baritone+: maximum visible pitch movement per tick, in degrees. */\n    public final Setting<Float> baritonePlusMaxPitchStep = new Setting<>(10.0F);\n\n    /** Baritone+: fraction of the remaining angle used each tick before the speed cap. */\n    public final Setting<Float> baritonePlusRotationEase = new Setting<>(0.36F);\n\n    /** Baritone+: render a soft, wider translucent path layer underneath the main path. */\n    public final Setting<Boolean> baritonePlusPathGlow = new Setting<>(true);\n'''
+          if anchor not in s:
+              raise SystemExit('smoothLookTicks anchor missing')
+          s = s.replace(anchor, plus_settings, 1)
+          settings.write_text(s)
+
+          # Proper visible yaw+pitch smoothing with wrap-safe yaw and capped eased steps.
+          look = root / 'src/main/java/baritone/behavior/LookBehavior.java'
+          s = look.read_text()
+          old = '''                    } else if (ctx.player().isFallFlying() ? Baritone.settings().elytraSmoothLook.value : Baritone.settings().smoothLook.value) {\n                        ctx.player().setYRot((float) this.smoothYawBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getYaw()));\n                        if (ctx.player().isFallFlying()) {\n                            ctx.player().setXRot((float) this.smoothPitchBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getPitch()));\n                        }\n                    }'''
+          new = '''                    } else if (ctx.player().isFallFlying() ? Baritone.settings().elytraSmoothLook.value : Baritone.settings().smoothLook.value) {\n                        final Settings settings = Baritone.settings();\n                        ctx.player().setYRot(smoothAxis(\n                                this.prevRotation.getYaw(),\n                                this.target.rotation.getYaw(),\n                                settings.baritonePlusMaxYawStep.value,\n                                settings.baritonePlusRotationEase.value,\n                                true\n                        ));\n                        ctx.player().setXRot(smoothAxis(\n                                this.prevRotation.getPitch(),\n                                this.target.rotation.getPitch(),\n                                settings.baritonePlusMaxPitchStep.value,\n                                settings.baritonePlusRotationEase.value,\n                                false\n                        ));\n                    }'''
+          if old not in s:
+              raise SystemExit('LookBehavior smoothing block missing')
+          s = s.replace(old, new, 1)
+
+          pig_anchor = '    public void pig() {\n'
+          helper = '''    private static float smoothAxis(float current, float target, float maxStep, float ease, boolean wrap) {\n        float delta = wrap ? wrapDegrees(target - current) : target - current;\n        if (Math.abs(delta) < 0.025F) {\n            return wrap ? wrapDegrees(target) : clampPitch(target);\n        }\n\n        float safeEase = Math.max(0.05F, Math.min(1.0F, ease));\n        float safeMax = Math.max(0.25F, maxStep);\n        float step = delta * safeEase;\n        step = Math.max(-safeMax, Math.min(safeMax, step));\n\n        // Avoid asymptotically crawling forever near the target.\n        if (Math.abs(step) < 0.10F) {\n            step = Math.copySign(Math.min(Math.abs(delta), 0.10F), delta);\n        }\n\n        float result = current + step;\n        return wrap ? wrapDegrees(result) : clampPitch(result);\n    }\n\n    private static float wrapDegrees(float value) {\n        value %= 360.0F;\n        if (value >= 180.0F) value -= 360.0F;\n        if (value < -180.0F) value += 360.0F;\n        return value;\n    }\n\n    private static float clampPitch(float value) {\n        return Math.max(-90.0F, Math.min(90.0F, value));\n    }\n\n    public void pig() {\n'''
+          if pig_anchor not in s:
+              raise SystemExit('pig anchor missing')
+          s = s.replace(pig_anchor, helper, 1)
+
+          resolve_anchor = '''            static Mode resolve(IPlayerContext ctx, boolean blockInteract) {\n                final Settings settings = Baritone.settings();\n                final boolean antiCheat = settings.antiCheatCompatibility.value;\n                final boolean blockFreeLook = settings.blockFreeLook.value;\n'''
+          resolve_new = '''            static Mode resolve(IPlayerContext ctx, boolean blockInteract) {\n                final Settings settings = Baritone.settings();\n                final boolean antiCheat = settings.antiCheatCompatibility.value;\n                final boolean blockFreeLook = settings.blockFreeLook.value;\n\n                // Baritone+: keep the visible camera following the bot, but let POST apply the smooth eased rotation.\n                if (settings.baritonePlusVisualRotations.value && !ctx.player().isFallFlying()) {\n                    return CLIENT;\n                }\n'''
+          if resolve_anchor not in s:
+              raise SystemExit('Target.Mode.resolve anchor missing')
+          s = s.replace(resolve_anchor, resolve_new, 1)
+          look.write_text(s)
+
+          # Modern path renderer: long smooth fade + subtle glow under a thin core line.
+          pr = root / 'src/main/java/baritone/utils/PathRenderer.java'
+          s = pr.read_text()
+          s = s.replace('settings.fadePath.value, 10, 20)', 'settings.fadePath.value, 18, 64)')
+
+          pattern = re.compile(r'''    public static void drawPath\(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, boolean fadeOut, int fadeStart0, int fadeEnd0, double offset\) \{.*?\n    \}\n\n    private static void emitPathLine''', re.S)
+          replacement = '''    public static void drawPath(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, boolean fadeOut, int fadeStart0, int fadeEnd0, double offset) {\n        if (settings.baritonePlusPathGlow.value) {\n            drawPathLayer(stack, positions, startIndex, color, fadeOut, fadeStart0, fadeEnd0, offset, settings.pathRenderLineWidthPixels.value * 2.8F, 0.13F);\n        }\n        drawPathLayer(stack, positions, startIndex, color, fadeOut, fadeStart0, fadeEnd0, offset, settings.pathRenderLineWidthPixels.value, 0.82F);\n    }\n\n    private static void drawPathLayer(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, boolean fadeOut, int fadeStart0, int fadeEnd0, double offset, float lineWidth, float nearAlpha) {\n        BufferBuilder bufferBuilder = IRenderer.startLines(color, nearAlpha);\n\n        int fadeStart = fadeStart0 + startIndex;\n        int fadeEnd = fadeEnd0 + startIndex;\n\n        for (int i = startIndex, next; i < positions.size() - 1; i = next) {\n            BetterBlockPos start = positions.get(i);\n            BetterBlockPos end = positions.get(next = i + 1);\n\n            int dirX = end.x - start.x;\n            int dirY = end.y - start.y;\n            int dirZ = end.z - start.z;\n\n            while (next + 1 < positions.size() && (!fadeOut || next + 1 < fadeStart) &&\n                    (dirX == positions.get(next + 1).x - end.x &&\n                            dirY == positions.get(next + 1).y - end.y &&\n                            dirZ == positions.get(next + 1).z - end.z)) {\n                end = positions.get(++next);\n            }\n\n            float alpha = nearAlpha;\n            if (fadeOut && i > fadeStart) {\n                if (i > fadeEnd) {\n                    break;\n                }\n                float t = (float) (i - fadeStart) / (float) Math.max(1, fadeEnd - fadeStart);\n                // Smoothstep makes the trail fade softly rather than linearly chopping away.\n                t = t * t * (3.0F - 2.0F * t);\n                alpha = Math.max(0.025F, nearAlpha * (1.0F - t));\n            }\n            IRenderer.glColor(color, alpha);\n            emitPathLine(bufferBuilder, stack, start.x, start.y, start.z, end.x, end.y, end.z, offset, lineWidth);\n        }\n\n        IRenderer.endLines(bufferBuilder, settings.renderPathIgnoreDepth.value);\n    }\n\n    private static void emitPathLine'''
+          s2, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit(f'PathRenderer drawPath replacement count={n}')
+          s = s2
+
+          old_sig = 'private static void emitPathLine(BufferBuilder bufferBuilder, PoseStack stack, double x1, double y1, double z1, double x2, double y2, double z2, double offset) {'
+          new_sig = 'private static void emitPathLine(BufferBuilder bufferBuilder, PoseStack stack, double x1, double y1, double z1, double x2, double y2, double z2, double offset, float lineWidth) {'
+          if old_sig not in s:
+              raise SystemExit('emitPathLine signature missing')
+          s = s.replace(old_sig, new_sig, 1)
+          # Only inside emitPathLine: use supplied width instead of the global setting.
+          emit_start = s.index(new_sig)
+          emit_end = s.index('\n    public static void drawManySelectionBoxes', emit_start)
+          chunk = s[emit_start:emit_end].replace('settings.pathRenderLineWidthPixels.value', 'lineWidth')
+          s = s[:emit_start] + chunk + s[emit_end:]
+          pr.write_text(s)
+
+          # A small preset users can copy if they already have an old settings.txt overriding defaults.
+          preset = '''# Baritone+ recommended visual/movement settings\n# Paste these as chat commands if an old Baritone config overrides the new defaults.\n#set baritonePlusVisualRotations true\n#set smoothLook true\n#set baritonePlusMaxYawStep 14\n#set baritonePlusMaxPitchStep 10\n#set baritonePlusRotationEase 0.36\n#set randomLooking 0\n#set randomLooking113 0\n#set renderPath true\n#set renderPathAsLine true\n#set pathRenderLineWidthPixels 1.8\n#set fadePath true\n#set baritonePlusPathGlow true\n#set renderPathIgnoreDepth false\n#set renderGoalAnimated false\n#set renderGoalIgnoreDepth false\n#set renderSelectionBoxes false\n'''
+          (root / 'BARITONE_PLUS_PRESET.txt').write_text(preset)
+          PY
+
+      - name: Build Baritone+
+        working-directory: baritone-plus
+        run: |
+          chmod +x gradlew
+          ./gradlew jar --stacktrace
+
+      - name: Package output
+        shell: bash
+        run: |
+          mkdir -p out
+          echo 'Built from XMRhapsody0807/NewBaritone (LGPL-3.0), modified as Baritone+.' > out/LICENSE-NOTE.txt
+          cp baritone-plus/BARITONE_PLUS_PRESET.txt out/
+          JAR=$(find baritone-plus/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*sources*' ! -name '*javadoc*' | sort | head -n 1)
+          test -n "$JAR"
+          cp "$JAR" out/BaritonePlus-26.1.2.jar
+          ls -lh out
+
+      - name: Upload Baritone+
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaritonePlus-26.1.2
+          path: out/*
+          retention-days: 1
