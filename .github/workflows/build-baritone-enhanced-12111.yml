@@ -1,0 +1,51 @@
+name: Build Baritone Enhanced 1.21.11
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-baritone-enhanced-12111.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Clone 1.21.11 Baritone port
+        run: git clone --depth 1 --branch update/1.21.11-fabric https://github.com/Nevarielle/baritone-1.21.11.git baritone-enhanced
+
+      - name: Apply Baritone Enhanced patches
+        run: python3 tools/build_baritone_enhanced.py
+
+      - name: Build Fabric JAR
+        working-directory: baritone-enhanced
+        run: |
+          chmod +x gradlew
+          ./gradlew :fabric:remapJar --stacktrace
+
+      - name: Package output
+        shell: bash
+        run: |
+          mkdir -p out
+          JAR=$(find baritone-enhanced/fabric/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*dev*' ! -name '*sources*' ! -name '*javadoc*' | sort | head -n 1)
+          test -n "$JAR"
+          cp "$JAR" out/Baritone-Enhanced-1.21.11.jar
+          cp baritone-enhanced/BARITONE_ENHANCED_COMMANDS.txt out/
+          printf 'Built from Nevarielle/baritone-1.21.11 (LGPL-3.0), modified as Baritone Enhanced.\nUpstream Baritone is LGPL-3.0-or-later.\n' > out/LICENSE-NOTE.txt
+
+      - name: Upload Baritone Enhanced
+        uses: actions/upload-artifact@v4
+        with:
+          name: Baritone-Enhanced-1.21.11
+          path: out/*
