@@ -26,7 +26,9 @@ jobs:
         run: git clone --depth 1 --branch update/1.21.11-fabric https://github.com/Nevarielle/baritone-1.21.11.git baritone-enhanced
 
       - name: Apply Baritone Enhanced patches
-        run: python3 tools/build_baritone_enhanced.py
+        run: |
+          python3 tools/build_baritone_enhanced.py
+          python3 tools/build_baritone_enhanced_fix.py
 
       - name: Build Fabric JAR
         working-directory: baritone-enhanced
